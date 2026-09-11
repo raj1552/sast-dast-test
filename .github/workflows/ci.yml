@@ -1,0 +1,100 @@
+name: CI - SAST & DAST
+
+# Runs on every push and pull request against main
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # ----------------------------------------------------------------------
+  # SAST: build, unit test, then a security lint scan of the source code
+  # ----------------------------------------------------------------------
+  sast:
+    name: Build, Test & SAST Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build the app
+        run: npm run build
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Run security lint (SAST)
+        # eslint-plugin-security scans the source code itself - no external
+        # account or secret needed. This is EXPECTED to fail on this repo:
+        # it contains intentional eval, command injection, hardcoded secret,
+        # SQL injection, and XSS to prove the gate actually catches them.
+        run: npx eslint . --ext .js
+
+  # ----------------------------------------------------------------------
+  # DAST: run the app locally inside the runner, then scan the live app
+  # ----------------------------------------------------------------------
+  dast:
+    name: DAST Scan (OWASP ZAP)
+    runs-on: ubuntu-latest
+    needs: sast
+    # Run DAST even if the SAST lint step above failed, since we still
+    # want to see what ZAP finds against the running app.
+    if: always()
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Build the app
+        run: npm run build
+
+      - name: Start the app in the background
+        run: nohup npm start &
+
+      - name: Wait for the app to be ready
+        run: |
+          for i in {1..15}; do
+            curl -sf http://localhost:3000 && break
+            echo "Waiting for app to start..." && sleep 3
+          done
+
+      - name: Run OWASP ZAP baseline scan
+        uses: zaproxy/action-baseline@v0.12.0
+        with:
+          target: 'http://localhost:3000'
+          fail_action: true
+          cmd_options: '-a'
+
+      - name: Upload ZAP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: report_html.html
+
+      # ------------------------------------------------------------------
+      # Not included yet (needs an external account + secret to run):
+      #
+      # - SonarQube/SonarCloud scan -> a fuller SAST option than ESLint,
+      #   needs SONAR_TOKEN + SONAR_HOST_URL as GitHub secrets
+      # ------------------------------------------------------------------
